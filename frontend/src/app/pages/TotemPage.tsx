@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Mic, StopCircle, ArrowRight, MapPin, HelpCircle, Accessibility } from "lucide-react";
-import { Sphere } from "../components/totem/Sphere";
+import { SimliClient, generateSimliSessionToken, generateIceServers } from "simli-client";
 import { WorkflowVisualizer, WorkflowStep } from "../components/totem/WorkflowVisualizer";
 import { LoadingOverlay } from "../components/totem/LoadingOverlay";
 import { AudioVisualizer } from "../components/totem/AudioVisualizer";
 import { cn } from "../../lib/utils";
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-const elevenLabsApiKey = import.meta.env.VITE_ELEVENLABS_API_KEY;
-const elevenLabsVoiceId = import.meta.env.VITE_ELEVENLABS_VOICE_ID;
+const supabaseUrl = (import.meta as any).env.VITE_SUPABASE_URL;
+const supabaseAnonKey = (import.meta as any).env.VITE_SUPABASE_ANON_KEY;
+const elevenLabsApiKey = (import.meta as any).env.VITE_ELEVENLABS_API_KEY;
+const elevenLabsVoiceId = (import.meta as any).env.VITE_ELEVENLABS_VOICE_ID;
+const simliApiKey = (import.meta as any).env.VITE_SIMLI_API_KEY;
+const simliFaceId = (import.meta as any).env.VITE_SIMLI_FACE_ID;
 
 type ConversationState = "idle" | "listening" | "processing" | "answering";
 
@@ -59,6 +61,8 @@ export function TotemPage() {
 
   const recognitionRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const simliClientRef = useRef<SimliClient | null>(null);
 
   const stateRef = useRef(state);
   const transcriptRef = useRef(transcript);
@@ -73,6 +77,50 @@ export function TotemPage() {
 
   useEffect(() => {
     audioRef.current = new Audio();
+  }, []);
+
+  // Initialize Simli WebRTC Client
+  useEffect(() => {
+    if (audioRef.current && !simliClientRef.current) {
+      const initSimli = async () => {
+        try {
+          const sessionTokenParams = {
+            config: {
+              faceId: simliFaceId,
+              handleSilence: true,
+              maxSessionLength: 3600,
+              maxIdleTime: 3600
+            },
+            apiKey: simliApiKey
+          };
+          const tokenRes = await generateSimliSessionToken(sessionTokenParams);
+          // Wait for videoRef to be attached if it's not yet
+          if (!videoRef.current) return;
+
+          const iceServers = await generateIceServers(simliApiKey);
+
+          simliClientRef.current = new SimliClient(
+            tokenRes.session_token,
+            videoRef.current!,
+            audioRef.current!,
+            iceServers
+          );
+
+          simliClientRef.current.on('start', () => console.log('Simli Avatar connected'));
+          simliClientRef.current.on('error', (e: any) => console.error('Simli connection failed', e));
+
+          await simliClientRef.current.start();
+        } catch (e) {
+          console.error("Failed to init Simli:", e);
+        }
+      };
+
+      // We must wait until the videoRef is actually attached in the DOM
+      const timer = setTimeout(() => {
+        initSimli();
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
   }, []);
 
   const unlockAudio = () => {
@@ -171,8 +219,8 @@ export function TotemPage() {
       setConversationContext(`Resposta: Gerando Áudio...`);
       setIsGeneratingImages(false);
 
-      // Call ElevenLabs TTS
-      const audioResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoiceId}?optimize_streaming_latency=3`, {
+      // Call ElevenLabs TTS (Requesting PCM 16kHz for Simli)
+      const audioResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoiceId}?output_format=pcm_16000&optimize_streaming_latency=3`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -189,33 +237,32 @@ export function TotemPage() {
         throw new Error("Erro ao gerar áudio com ElevenLabs");
       }
 
-      const audioBlob = await audioResponse.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
+      const audioArrayBuffer = await audioResponse.arrayBuffer();
+      const pcmData = new Uint8Array(audioArrayBuffer);
 
-      if (!audioRef.current) {
-        audioRef.current = new Audio();
+      if (simliClientRef.current) {
+        simliClientRef.current.sendAudioData(pcmData);
+      } else {
+        console.warn("SimliClient is not initialized.");
       }
-      const audio = audioRef.current;
-      audio.src = audioUrl;
 
-      // Calculate robust relative time mapping on the fly during audio playback
-      audio.ontimeupdate = () => {
-        const duration = audio.duration;
-        // Ignore if duration is NaN, 0, or Infinity (streaming metadata bugs)
-        if (!duration || isNaN(duration) || duration === Infinity) return;
+      const duration = pcmData.length / 32000; // 16kHz, 16-bit, 1 channel = 32000 bytes/sec
 
-        let totalChars = 0;
-        workflow.steps.forEach((s: any) => totalChars += (s.spoken_text || s.description || "123").length);
+      let totalChars = 0;
+      workflow?.steps.forEach((s: any) => totalChars += (s.spoken_text || s.description || "123").length);
 
-        const currentTime = audio.currentTime || 0;
-        const percent = currentTime / duration;
+      // Simulate audio progress for the UI cards
+      let currentTimeMs = 0;
+      const progressInterval = setInterval(() => {
+        currentTimeMs += 100;
+        const percent = (currentTimeMs / 1000) / duration;
 
         let cumulativePercent = 0;
-        let foundIndex = workflow.steps.length - 1; // default to last
+        let foundIndex = (workflow?.steps.length || 1) - 1;
 
         if (percent < 0.01) {
           foundIndex = 0;
-        } else {
+        } else if (workflow?.steps) {
           for (let i = 0; i < workflow.steps.length; i++) {
             const s = workflow.steps[i];
             const weight = (s.spoken_text || s.description || "123").length / (totalChars || 1);
@@ -227,9 +274,21 @@ export function TotemPage() {
             }
           }
         }
-
         setCurrentStepIndex(prev => prev !== foundIndex ? foundIndex : prev);
-      };
+      }, 100);
+
+      // Timeout to end state
+      const endTimeout = setTimeout(() => {
+        clearInterval(progressInterval);
+        setState("idle");
+        setActiveWorkflow(null);
+        setCurrentStepIndex(0);
+        setConversationContext("");
+      }, duration * 1000 + 1000); // 1s padding for Simli networking
+
+      // Store intervals natively in window so handleStop can clear them if needed
+      (window as any)._audioProgressInterval = progressInterval;
+      (window as any)._audioEndTimeout = endTimeout;
 
       setState("answering");
       setConversationContext(replyText); // Show the text while speaking
@@ -247,15 +306,6 @@ export function TotemPage() {
       } catch (e) {
         console.error("VLibras auto-translate issue:", e);
       }
-
-      audio.onended = () => {
-        setState("idle");
-        setActiveWorkflow(null);
-        setCurrentStepIndex(0);
-        setConversationContext("");
-      };
-
-      await audio.play();
 
     } catch (error: any) {
       console.error("Error processing question:", error);
@@ -297,11 +347,14 @@ export function TotemPage() {
       recognitionRef.current.stop();
     }
 
-    // Immediately stop audio if playing
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.currentTime = 0;
+    // Immediately stop audio if playing via Simli
+    if (simliClientRef.current) {
+      simliClientRef.current.ClearBuffer();
     }
+
+    // Clear simulated timeouts
+    if ((window as any)._audioProgressInterval) clearInterval((window as any)._audioProgressInterval);
+    if ((window as any)._audioEndTimeout) clearTimeout((window as any)._audioEndTimeout);
 
     setState("idle");
     setActiveWorkflow(null);
@@ -443,16 +496,30 @@ export function TotemPage() {
           )}
         </AnimatePresence>
 
-        {/* The Sphere - Moves based on state */}
+        {/* The Avatar Screen - Moves based on state */}
         <motion.div
           animate={{
             y: state === "answering" ? -120 : 0,
-            scale: state === "answering" ? 0.7 : 1,
+            scale: state === "answering" ? 0.8 : 1,
+            opacity: state === "listening" ? 0.6 : 1,
           }}
-          transition={{ type: "spring", stiffness: 50, damping: 15 }}
-          className="relative z-0"
+          transition={{ duration: 0.8, type: "spring", bounce: 0.3 }}
+          className="relative z-10 w-96 h-96 mx-auto rounded-full overflow-hidden border-2 border-cyan-500/30 shadow-[0_0_80px_rgba(8,145,178,0.2)]"
         >
-          <Sphere state={state === "listening" ? "listening" : state === "processing" ? "processing" : state === "answering" ? "speaking" : "idle"} />
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover"
+          />
+          <audio ref={audioRef} autoPlay className="hidden" />
+          {state === "listening" && (
+            <div className="absolute inset-0 rounded-full border-4 border-cyan-400 animate-ping opacity-30 pointer-events-none" />
+          )}
+          {state === "processing" && (
+            <div className="absolute inset-0 rounded-full border-2 border-cyan-500 opacity-50 pointer-events-none animate-pulse" />
+          )}
         </motion.div>
 
         {/* Workflow Visualization Overlay */}
