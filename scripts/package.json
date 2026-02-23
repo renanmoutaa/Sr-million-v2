@@ -1,0 +1,11 @@
+{
+  "name": "sr-million-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.97.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.104.0",
+    "pdf-parse": "^1.1.1"
+  }
+}
