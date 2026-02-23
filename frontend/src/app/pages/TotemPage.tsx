@@ -108,8 +108,6 @@ export function TotemPage() {
 
           simliClientRef.current.on('start', () => console.log('Simli Avatar connected'));
           simliClientRef.current.on('error', (e: any) => console.error('Simli connection failed', e));
-
-          await simliClientRef.current.start();
         } catch (e) {
           console.error("Failed to init Simli:", e);
         }
@@ -119,17 +117,33 @@ export function TotemPage() {
       const timer = setTimeout(() => {
         initSimli();
       }, 1000);
-      return () => clearTimeout(timer);
+      return () => {
+        clearTimeout(timer);
+        if (simliClientRef.current) {
+          try {
+            (simliClientRef.current as any).close?.();
+          } catch (e) { }
+        }
+      };
     }
   }, []);
 
-  const unlockAudio = () => {
+  const unlockAudio = async () => {
     if (audioRef.current) {
       // Small silent 8kHz WAV to bless the audio element's execution context
       audioRef.current.src = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
       audioRef.current.play().then(() => {
         audioRef.current?.pause();
       }).catch(() => { });
+    }
+
+    if (simliClientRef.current) {
+      try {
+        await simliClientRef.current.start();
+        console.log("Simli WebRTC Audio Unlocked!");
+      } catch (e) {
+        console.warn('Simli start explicitly called but failed', e);
+      }
     }
   };
 
@@ -499,12 +513,15 @@ export function TotemPage() {
         {/* The Avatar Screen - Moves based on state */}
         <motion.div
           animate={{
-            y: state === "answering" ? -120 : 0,
-            scale: state === "answering" ? 0.8 : 1,
             opacity: state === "listening" ? 0.6 : 1,
           }}
           transition={{ duration: 0.8, type: "spring", bounce: 0.3 }}
-          className="relative z-10 w-96 h-96 mx-auto rounded-full overflow-hidden border-2 border-cyan-500/30 shadow-[0_0_80px_rgba(8,145,178,0.2)]"
+          className={cn(
+            "rounded-full overflow-hidden border-2 border-cyan-500/30 shadow-[0_0_80px_rgba(8,145,178,0.2)] transition-all duration-1000",
+            state === "answering"
+              ? "absolute top-8 left-1/2 -translate-x-1/2 w-48 h-48 z-50"
+              : "relative mx-auto w-96 h-96 z-10 mt-16"
+          )}
         >
           <video
             ref={videoRef}
