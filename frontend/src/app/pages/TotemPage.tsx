@@ -58,6 +58,8 @@ export function TotemPage() {
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
   const [showA11yMenu, setShowA11yMenu] = useState(false);
   const [showSubtitles, setShowSubtitles] = useState(false);
+  const [isAvatarConnected, setIsAvatarConnected] = useState(false);
+  const [simliError, setSimliError] = useState<string | null>(null);
 
   const recognitionRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -75,8 +77,9 @@ export function TotemPage() {
     transcriptRef.current = transcript;
   }, [transcript]);
 
+  // Removed redundant audio initialization that was breaking DOM reference
   useEffect(() => {
-    audioRef.current = new Audio();
+    // audioRef is now correctly tied only to the hidden <audio> element in the JSX
   }, []);
 
   // Initialize Simli WebRTC Client
@@ -106,10 +109,28 @@ export function TotemPage() {
             iceServers
           );
 
-          simliClientRef.current.on('start', () => console.log('Simli Avatar connected'));
-          simliClientRef.current.on('error', (e: any) => console.error('Simli connection failed', e));
-        } catch (e) {
+          simliClientRef.current.on('start', () => {
+            console.log('Simli Avatar connected');
+            setIsAvatarConnected(true);
+            setSimliError(null);
+          });
+          simliClientRef.current.on('error', (e: any) => {
+            const errorMsg = String(e);
+            console.error('Simli connection failed', errorMsg);
+            setIsAvatarConnected(false);
+            if (errorMsg.includes("RATE LIMIT")) {
+              setSimliError("Limite de conexões atingido. Aguarde 30 segundos.");
+            } else {
+              setSimliError("Erro de conexão com o avatar.");
+            }
+          });
+          simliClientRef.current.on('stop', () => {
+            console.log('Simli Avatar stopped');
+            setIsAvatarConnected(false);
+          });
+        } catch (e: any) {
           console.error("Failed to init Simli:", e);
+          setSimliError("Falha ao inicializar o avatar.");
         }
       };
 
@@ -121,12 +142,31 @@ export function TotemPage() {
         clearTimeout(timer);
         if (simliClientRef.current) {
           try {
-            (simliClientRef.current as any).close?.();
+            simliClientRef.current.stop();
+            simliClientRef.current = null; // Ensure nullified for next effect
           } catch (e) { }
         }
       };
     }
   }, []);
+
+  const handleRetrySimli = () => {
+    if (simliClientRef.current) {
+      simliClientRef.current.stop();
+      simliClientRef.current = null;
+    }
+    setSimliError("Reiniciando...");
+    setIsAvatarConnected(false);
+    // Component will re-init due to simliClientRef being null in next render?
+    // Actually simplicity: just force a reload or wait for the useEffect again
+    // Let's just trigger a manual init here for speed
+    const reInit = async () => {
+      // repeat init logic or just reload? 
+      // Better: just trigger the initial useEffect logic again by using a key or simliClientRef null check
+      window.location.reload();
+    };
+    setTimeout(reInit, 500);
+  };
 
   const unlockAudio = async () => {
     if (audioRef.current) {
@@ -253,14 +293,25 @@ export function TotemPage() {
 
       const audioArrayBuffer = await audioResponse.arrayBuffer();
       const pcmData = new Uint8Array(audioArrayBuffer);
+      const duration = pcmData.length / 32000; // 16kHz, 16-bit mono = 32000 bytes/sec
 
-      if (simliClientRef.current) {
-        simliClientRef.current.sendAudioData(pcmData);
-      } else {
-        console.warn("SimliClient is not initialized.");
-      }
+      setState("answering");
+      setConversationContext(replyText);
 
-      const duration = pcmData.length / 32000; // 16kHz, 16-bit, 1 channel = 32000 bytes/sec
+      // Sending audio in chunks to Simli for better synchronization
+      const sendAudioInChunks = async () => {
+        const chunkSize = 4000; // Smaller chunks for even better sync (~125ms)
+        for (let i = 0; i < pcmData.length; i += chunkSize) {
+          if (!simliClientRef.current) break;
+          const chunk = pcmData.slice(i, i + chunkSize);
+          simliClientRef.current.sendAudioData(chunk);
+          // Wait slightly less than chunk duration (125ms)
+          await new Promise(resolve => setTimeout(resolve, 110));
+        }
+      };
+
+      // Start the chunked transmission
+      sendAudioInChunks();
 
       let totalChars = 0;
       workflow?.steps.forEach((s: any) => totalChars += (s.spoken_text || s.description || "123").length);
@@ -298,9 +349,9 @@ export function TotemPage() {
         setActiveWorkflow(null);
         setCurrentStepIndex(0);
         setConversationContext("");
-      }, duration * 1000 + 1000); // 1s padding for Simli networking
+        setIsAvatarConnected(false);
+      }, duration * 1000 + 1000);
 
-      // Store intervals natively in window so handleStop can clear them if needed
       (window as any)._audioProgressInterval = progressInterval;
       (window as any)._audioEndTimeout = endTimeout;
 
@@ -377,6 +428,7 @@ export function TotemPage() {
     setTranscript("");
     setError("");
     setIsGeneratingImages(false);
+    setIsAvatarConnected(false);
   };
 
   const handleQuickAction = async (key: string) => {
@@ -519,7 +571,7 @@ export function TotemPage() {
           className={cn(
             "rounded-full overflow-hidden border-2 border-cyan-500/30 shadow-[0_0_80px_rgba(8,145,178,0.2)] transition-all duration-1000",
             state === "answering"
-              ? "absolute top-8 left-1/2 -translate-x-1/2 w-48 h-48 z-50"
+              ? "absolute top-4 left-1/2 -translate-x-1/2 w-72 h-72 z-50"
               : "relative mx-auto w-96 h-96 z-10 mt-16"
           )}
         >
@@ -527,9 +579,31 @@ export function TotemPage() {
             ref={videoRef}
             autoPlay
             playsInline
-            muted
-            className="w-full h-full object-cover"
+            className={cn(
+              "w-full h-full object-cover transition-opacity duration-1000",
+              isAvatarConnected ? "opacity-100" : "opacity-0"
+            )}
           />
+          {!isAvatarConnected && state === "answering" && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/80 backdrop-blur-md z-10">
+              {simliError ? (
+                <>
+                  <p className="text-red-400 text-[10px] mb-4 text-center px-4 uppercase tracking-wider">{simliError}</p>
+                  <button
+                    onClick={handleRetrySimli}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-cyan-400 text-[9px] rounded-full border border-cyan-500/30 transition-all font-bold uppercase tracking-widest shadow-lg shadow-cyan-500/10"
+                  >
+                    Reiniciar Conexão
+                  </button>
+                </>
+              ) : (
+                <>
+                  <div className="w-12 h-12 border-4 border-cyan-500/30 border-t-cyan-500 rounded-full animate-spin mb-4" />
+                  <p className="text-[10px] text-cyan-400 uppercase tracking-widest animate-pulse">Estabelecendo Conexão...</p>
+                </>
+              )}
+            </div>
+          )}
           <audio ref={audioRef} autoPlay className="hidden" />
           {state === "listening" && (
             <div className="absolute inset-0 rounded-full border-4 border-cyan-400 animate-ping opacity-30 pointer-events-none" />
