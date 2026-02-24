@@ -13,9 +13,16 @@ export type WorkflowStep = {
 interface WorkflowVisualizerProps {
   steps: WorkflowStep[];
   className?: string;
+  elaboratedBy?: string;
+  approvedBy?: string;
 }
 
-export function WorkflowVisualizer({ steps, className }: WorkflowVisualizerProps) {
+export function WorkflowVisualizer({
+  steps,
+  className,
+  elaboratedBy = "Kariny Rassmussem",
+  approvedBy = "Diogo Leonardo Barbosa"
+}: WorkflowVisualizerProps) {
   if (!steps || steps.length === 0) return null;
 
   return (
@@ -189,7 +196,7 @@ export function WorkflowVisualizer({ steps, className }: WorkflowVisualizerProps
 
                 {/* Step Number Badge */}
                 <div className={cn(
-                  "absolute bottom-2 left-2 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold",
+                  "absolute top-2 left-2 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold z-10",
                   step.status === "current" ? "bg-cyan-500 text-black" :
                     step.status === "completed" ? "bg-green-500 text-black" :
                       "bg-gray-700 text-gray-400"
@@ -201,6 +208,24 @@ export function WorkflowVisualizer({ steps, className }: WorkflowVisualizerProps
           ))}
         </AnimatePresence>
       </div>
+
+      {/* Branding Footer */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 1 }}
+        className="mt-6 flex flex-col sm:flex-row items-center justify-center gap-4 sm:gap-8 border-t border-white/10 pt-6"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Elaborado por:</span>
+          <span className="text-xs text-cyan-400 font-medium tracking-wide">{elaboratedBy}</span>
+        </div>
+        <div className="hidden sm:block w-px h-3 bg-white/10" />
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Aprovado por:</span>
+          <span className="text-xs text-cyan-400 font-medium tracking-wide">{approvedBy}</span>
+        </div>
+      </motion.div>
     </div>
   );
 }

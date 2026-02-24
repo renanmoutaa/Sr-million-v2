@@ -65,18 +65,16 @@ As suas respostas devem ser adequadas para serem faladas em voz alta (texto para
 
 Você DEVE OBRIGATORIAMENTE retornar sua resposta em um formato JSON na seguinte estrutura exata:
 {
-  "workflow_title": "Título conciso da resposta (ex: Etapas de Vendas, Resumo do POP, etc)",
+  "workflow_title": "Título curto do fluxo (ex: Fluxo Marketing, Fluxo Técnico, Fluxo Comercial)",
+  "elaborated_by": "Kariny Rassmussem",
+  "approved_by": "Diogo Leonardo Barbosa",
   "steps": [
     { 
-      "spoken_text": "O trecho da frase natural e conversacional que o robô dirá em voz alta. Fale naturalmente como um humano. PROIBIDO dizer 'Passo', 'Número', etc.",
+      "spoken_text": "O trecho da frase natural e conversacional que o robô dirá em voz alta. PROIBIDO dizer 'Passo', 'Número', etc.",
       "label": "Título curto do card", 
       "description": "Resumo em uma linha para ler na tela" 
     },
-    { 
-      "spoken_text": "Continuação da explicação... SEMPRE o último card DEVE terminar a fala com um gancho convidativo, ex: 'Ficou com alguma dúvida em alguma dessas etapas?'.",
-      "label": "Título curto do card", 
-      "description": "Resumo em uma linha para ler na tela" 
-    }
+    ...
   ]
 }
 O array "steps" pode ter de 1 até 8 passos no máximo, dependendo do documento.
@@ -104,7 +102,17 @@ ${contextText}
     })
 
     const llmContent = chatResponse.choices[0].message.content
-    let parsedContent = { reply: "Desculpe, ocorreu um erro na formatação da resposta.", workflow_title: "Erro", steps: [] }
+    let parsedContent: {
+      reply?: string;
+      workflow_title?: string;
+      elaborated_by?: string;
+      approved_by?: string;
+      steps: any[]
+    } = {
+      reply: "Desculpe, ocorreu um erro na formatação da resposta.",
+      workflow_title: "Erro",
+      steps: []
+    }
     try {
       if (llmContent) parsedContent = JSON.parse(llmContent)
     } catch (e) {
@@ -114,6 +122,8 @@ ${contextText}
     const workflow = {
       id: "dynamic_answer",
       title: parsedContent.workflow_title || "Resposta Detalhada",
+      elaborated_by: parsedContent.elaborated_by || "Kariny Rassmussem",
+      approved_by: parsedContent.approved_by || "Diogo Leonardo Barbosa",
       steps: parsedContent.steps?.map((step: any, index: number) => ({
         id: index.toString(),
         label: step.label,
