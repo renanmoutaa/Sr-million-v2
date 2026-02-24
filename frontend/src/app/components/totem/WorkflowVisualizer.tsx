@@ -6,6 +6,7 @@ export type WorkflowStep = {
   id: string;
   label: string;
   description: string;
+  spoken_text?: string;
   status: "pending" | "current" | "completed";
   imageUrl?: string | null;
 };

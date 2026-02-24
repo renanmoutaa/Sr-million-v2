@@ -559,20 +559,43 @@ export function TotemPage() {
         </div>
       </header>
 
-      {/* Context Display - Minimalist (Acting as Subtitles) */}
-      <AnimatePresence>
-        {showSubtitles && conversationContext && (
+      {/* Context Display - Step Subtitles */}
+      <AnimatePresence mode="wait">
+        {showSubtitles && activeWorkflow && state === "answering" && (
+          <motion.div
+            key={currentStepIndex}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="absolute top-[75%] translate-y-4 left-8 right-8 z-10 mx-auto max-w-4xl"
+          >
+            <div className="bg-white/5 backdrop-blur-md px-6 py-4 rounded-xl border border-white/10 shadow-2xl">
+              <span className="text-xs text-cyan-400 uppercase tracking-widest font-bold block mb-2 opacity-70">
+                Narrando: Passo {currentStepIndex + 1}
+              </span>
+              <p className="text-xl text-slate-100 font-medium leading-relaxed text-center">
+                {activeWorkflow.steps[currentStepIndex]?.spoken_text || activeWorkflow.steps[currentStepIndex]?.description}
+              </p>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Fallback context when NOT in an explicit workflow step or listening */}
+        {showSubtitles && conversationContext && !activeWorkflow && (
           <motion.div
             initial={{ opacity: 0, y: -20 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -20 }}
-            className="absolute top-24 right-8 max-w-xs text-right z-20"
+            className="absolute top-36 left-8 right-8 z-10 mx-auto max-w-4xl"
           >
-            <div className="bg-white/5 backdrop-blur-md px-4 py-2 rounded-lg border border-white/10 inline-block shadow-lg">
-              <span className="text-xs text-cyan-400 uppercase tracking-wider block mb-1">Contexto Atual / Legenda</span>
-              <p className="text-sm text-slate-300 font-light">{conversationContext}</p>
+            <div className="bg-white/5 backdrop-blur-md px-6 py-4 rounded-xl border border-white/10 shadow-2xl">
+              <p className="text-base text-slate-200 font-light leading-relaxed text-justify">
+                {conversationContext}
+              </p>
               {transcript && state === "listening" && (
-                <p className="text-xs text-cyan-200 mt-2 italic">{transcript}</p>
+                <p className="text-sm text-cyan-200 mt-4 italic border-t border-white/5 pt-2 text-center">
+                  {transcript}
+                </p>
               )}
             </div>
           </motion.div>
