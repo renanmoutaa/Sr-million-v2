@@ -36,7 +36,7 @@ export function WorkflowVisualizer({
         Protocolo de Execução
       </motion.h3>
 
-      <div className="relative flex flex-wrap justify-center gap-x-4 gap-y-12 w-full max-w-5xl mx-auto pb-8 pt-4 px-4">
+      <div className="relative flex flex-wrap justify-center gap-x-2 gap-y-4 w-full max-w-7xl mx-auto pb-2 pt-1 px-1 min-h-0">
         <AnimatePresence mode="popLayout">
           {steps.map((step, index) => (
             <motion.div
@@ -50,7 +50,7 @@ export function WorkflowVisualizer({
                 stiffness: 100,
                 damping: 15
               }}
-              className="relative flex-none w-[calc(50%-1rem)] sm:w-[calc(33%-1rem)] md:w-[calc(25%-1rem)] max-w-[170px]"
+              className="relative flex-none w-[calc(33%-0.5rem)] sm:w-[calc(25%-0.5rem)] md:w-[calc(18%-0.5rem)] xl:w-[calc(12%-0.5rem)] min-w-[100px] max-w-[140px]"
             >
               {/* Connection Line to Next Step */}
               {index < steps.length - 1 && index % 4 !== 3 && (
@@ -104,18 +104,23 @@ export function WorkflowVisualizer({
               {/* Step Card */}
               <motion.div
                 className={cn(
-                  "relative w-full rounded-xl overflow-hidden transition-all duration-500",
-                  "backdrop-blur-md border-2",
+                  "relative w-full rounded-xl overflow-hidden transition-all duration-700",
+                  "backdrop-blur-xl border-2",
                   step.status === "current"
-                    ? "bg-cyan-500/20 border-cyan-500/60 shadow-[0_0_30px_rgba(34,211,238,0.3)]"
+                    ? "bg-cyan-500/30 border-cyan-400/80 shadow-[0_0_40px_rgba(34,211,238,0.4)] z-10"
                     : step.status === "completed"
-                      ? "bg-green-500/10 border-green-500/30"
-                      : "bg-black/40 border-white/10 opacity-60"
+                      ? "bg-green-500/10 border-green-500/40"
+                      : "bg-black/60 border-white/5 opacity-40"
                 )}
                 animate={{
-                  scale: step.status === "current" ? 1.05 : 1,
+                  scale: step.status === "current" ? 1.1 : 1,
+                  y: step.status === "current" ? -10 : 0,
                 }}
-                transition={{ duration: 0.3 }}
+                transition={{
+                  type: "spring",
+                  stiffness: 300,
+                  damping: 20
+                }}
               >
                 {/* Image Container */}
                 <div className="relative w-full h-20 md:h-28 bg-gradient-to-b from-cyan-950/50 to-black overflow-hidden">

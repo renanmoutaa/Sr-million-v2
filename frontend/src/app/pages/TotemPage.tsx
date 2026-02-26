@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Mic, StopCircle, ArrowRight, MapPin, HelpCircle, Accessibility } from "lucide-react";
-import { SimliClient, generateSimliSessionToken, generateIceServers } from "simli-client";
 import { WorkflowVisualizer, WorkflowStep } from "../components/totem/WorkflowVisualizer";
 import { LoadingOverlay } from "../components/totem/LoadingOverlay";
 import { AudioVisualizer } from "../components/totem/AudioVisualizer";
@@ -10,8 +9,6 @@ const supabaseUrl = (import.meta as any).env.VITE_SUPABASE_URL;
 const supabaseAnonKey = (import.meta as any).env.VITE_SUPABASE_ANON_KEY;
 const elevenLabsApiKey = (import.meta as any).env.VITE_ELEVENLABS_API_KEY;
 const elevenLabsVoiceId = (import.meta as any).env.VITE_ELEVENLABS_VOICE_ID;
-const simliApiKey = (import.meta as any).env.VITE_SIMLI_API_KEY;
-const simliFaceId = (import.meta as any).env.VITE_SIMLI_FACE_ID;
 
 type ConversationState = "idle" | "listening" | "processing" | "answering";
 
@@ -60,15 +57,13 @@ export function TotemPage() {
   const [isGeneratingImages, setIsGeneratingImages] = useState(false);
   const [showA11yMenu, setShowA11yMenu] = useState(false);
   const [showSubtitles, setShowSubtitles] = useState(false);
-  const [isAvatarConnected, setIsAvatarConnected] = useState(false);
-  const [simliError, setSimliError] = useState<string | null>(null);
+  const [useNativeVoice, setUseNativeVoice] = useState(false); // Default: ElevenLabs (Premium) ativado
   const [isPaused, setIsPaused] = useState(false);
   const [hasFinishedAudio, setHasFinishedAudio] = useState(false);
 
   const recognitionRef = useRef<any>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const simliClientRef = useRef<SimliClient | null>(null);
+  const finishingTimeoutRef = useRef<number | null>(null);
 
   const stateRef = useRef(state);
   const transcriptRef = useRef(transcript);
@@ -86,92 +81,6 @@ export function TotemPage() {
     // audioRef is now correctly tied only to the hidden <audio> element in the JSX
   }, []);
 
-  // Simli initialization disabled as per user request to focus on audio
-  /*
-  useEffect(() => {
-    if (audioRef.current && !simliClientRef.current) {
-      const initSimli = async () => {
-        try {
-          const sessionTokenParams = {
-            config: {
-              faceId: simliFaceId,
-              handleSilence: true,
-              maxSessionLength: 3600,
-              maxIdleTime: 3600
-            },
-            apiKey: simliApiKey
-          };
-          const tokenRes = await generateSimliSessionToken(sessionTokenParams);
-          if (!videoRef.current) return;
-
-          const iceServers = await generateIceServers(simliApiKey);
-
-          simliClientRef.current = new SimliClient(
-            tokenRes.session_token,
-            videoRef.current!,
-            audioRef.current!,
-            iceServers
-          );
-
-          simliClientRef.current.on('start', () => {
-            console.log('Simli Avatar connected');
-            setIsAvatarConnected(true);
-            setSimliError(null);
-          });
-          simliClientRef.current.on('error', (e: any) => {
-            const errorMsg = String(e);
-            console.error('Simli connection failed', errorMsg);
-            setIsAvatarConnected(false);
-            if (errorMsg.includes("RATE LIMIT")) {
-              setSimliError("Limite de conexões atingido. Aguarde 30 segundos.");
-            } else {
-              setSimliError("Erro de conexão com o avatar.");
-            }
-          });
-          simliClientRef.current.on('stop', () => {
-            console.log('Simli Avatar stopped');
-            setIsAvatarConnected(false);
-          });
-        } catch (e: any) {
-          console.error("Failed to init Simli:", e);
-          setSimliError("Falha ao inicializar o avatar.");
-        }
-      };
-
-      const timer = setTimeout(() => {
-        initSimli();
-      }, 1000);
-      return () => {
-        clearTimeout(timer);
-        if (simliClientRef.current) {
-          try {
-            simliClientRef.current.stop();
-            simliClientRef.current = null;
-          } catch (e) { }
-        }
-      };
-    }
-  }, []);
-  */
-
-  const handleRetrySimli = () => {
-    if (simliClientRef.current) {
-      simliClientRef.current.stop();
-      simliClientRef.current = null;
-    }
-    setSimliError("Reiniciando...");
-    setIsAvatarConnected(false);
-    // Component will re-init due to simliClientRef being null in next render?
-    // Actually simplicity: just force a reload or wait for the useEffect again
-    // Let's just trigger a manual init here for speed
-    const reInit = async () => {
-      // repeat init logic or just reload? 
-      // Better: just trigger the initial useEffect logic again by using a key or simliClientRef null check
-      window.location.reload();
-    };
-    setTimeout(reInit, 500);
-  };
-
   const unlockAudio = async () => {
     if (audioRef.current) {
       // Small silent 8kHz WAV to bless the audio element's execution context
@@ -180,16 +89,9 @@ export function TotemPage() {
         audioRef.current?.pause();
       }).catch(() => { });
     }
-
-    if (simliClientRef.current) {
-      try {
-        await simliClientRef.current.start();
-        console.log("Simli WebRTC Audio Unlocked!");
-      } catch (e) {
-        console.warn('Simli start explicitly called but failed', e);
-      }
-    }
   };
+
+
 
   // Initialize Web Speech API
   useEffect(() => {
@@ -247,6 +149,10 @@ export function TotemPage() {
     setConversationContext(`Sr. Million está pensando...`);
     setError("");
     setIsGeneratingImages(true);
+    if (finishingTimeoutRef.current) {
+      clearTimeout(finishingTimeoutRef.current);
+      finishingTimeoutRef.current = null;
+    }
 
     try {
       const response = await fetch(
@@ -262,7 +168,8 @@ export function TotemPage() {
       );
 
       if (!response.ok) {
-        throw new Error("Erro ao processar roteiro com a IA.");
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || "Erro ao processar roteiro com a IA.");
       }
 
       const data = await response.json();
@@ -274,72 +181,84 @@ export function TotemPage() {
         setCurrentStepIndex(0);
       }
 
-      setConversationContext(`Resposta: Gerando Áudio...`);
+      setConversationContext(replyText);
       setIsGeneratingImages(false);
-
-      // Call ElevenLabs TTS (Using MP3 for direct playback)
-      const audioResponse = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoiceId}?output_format=mp3_44100_128&optimize_streaming_latency=3`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'xi-api-key': elevenLabsApiKey
-        },
-        body: JSON.stringify({
-          text: replyText,
-          model_id: "eleven_multilingual_v2",
-          voice_settings: { stability: 0.5, similarity_boost: 0.7 }
-        })
-      });
-
-      if (!audioResponse.ok) {
-        throw new Error("Erro ao gerar áudio com ElevenLabs");
-      }
-
-      const audioBlob = await audioResponse.blob();
-      const audioUrl = URL.createObjectURL(audioBlob);
-
-      if (audioRef.current) {
-        audioRef.current.src = audioUrl;
-        audioRef.current.play().catch(e => console.error("Auto-play failed:", e));
-      }
 
       setState("answering");
       setConversationContext(replyText);
 
-      // Native audio onended event to properly clean up
-      if (audioRef.current) {
-        audioRef.current.onended = () => {
-          console.log("Audio finished naturally.");
+      // --- LOGIC: Premium Voice (ElevenLabs) vs Native Voice (Tests) ---
+      if (useNativeVoice) {
+        // Zera latência e custo usando o TTS nativo do navegador
+        const utterance = new SpeechSynthesisUtterance(replyText);
+        utterance.lang = "pt-BR";
+        utterance.rate = 1.1; // Ligeiramente mais rápido para simular o ElevenLabs nativo
+
+        utterance.onend = () => {
+          console.log("Native TTS finished.");
           handleFinish();
         };
 
-        audioRef.current.onplay = () => {
-          setIsPaused(false);
-          console.log("Audio playing...");
+        utterance.onerror = (e) => {
+          console.error("Native TTS error:", e);
+          handleFinish();
         };
 
-        audioRef.current.onpause = () => {
-          setIsPaused(true);
-          console.log("Audio paused.");
-        };
+        window.speechSynthesis.speak(utterance);
+        setIsPaused(false);
+      } else {
+        // Otimização Máxima Premium: Streaming Nativo do Áudio via Supabase!
+        const audioUrl = `${supabaseUrl}/functions/v1/chat?action=tts&text=${encodeURIComponent(replyText)}`;
 
-        audioRef.current.onerror = (e) => {
-          console.error("Audio error event:", e);
-          setError("Erro na reprodução de áudio. Verifique sua conexão.");
-        };
+        if (audioRef.current && audioUrl) {
+          audioRef.current.src = audioUrl;
+          audioRef.current.play().catch(e => console.error("Auto-play failed:", e));
+        }
+
+        // Native audio events
+        if (audioRef.current) {
+          audioRef.current.onended = () => {
+            console.log("Audio finished naturally.");
+            handleFinish();
+          };
+          audioRef.current.onplay = () => {
+            setIsPaused(false);
+            console.log("Audio playing...");
+          };
+          audioRef.current.onpause = () => {
+            setIsPaused(true);
+            console.log("Audio paused.");
+          };
+          audioRef.current.onerror = (e) => {
+            console.error("Audio error event:", e);
+            setError("Erro na reprodução de áudio da ElevenLabs. Verifique sua conexão.");
+          };
+        }
       }
 
       const estimatedDuration = replyText.length * 0.1;
       let totalChars = 0;
       workflow?.steps.forEach((s: any) => totalChars += (s.spoken_text || s.description || "123").length);
 
-      // Simulate audio progress for the UI cards
-      // We don't use absolute duration anymore for stopping, only for progress
-      const progressInterval = setInterval(() => {
-        if (!audioRef.current || audioRef.current.paused) return;
+      const startTime = Date.now();
 
-        const currentTime = audioRef.current.currentTime;
-        const totalDuration = audioRef.current.duration || estimatedDuration;
+      // Simulate audio progress for the UI cards
+      const progressInterval = setInterval(() => {
+        let currentTime = 0;
+        let totalDuration = 0;
+
+        if (useNativeVoice) {
+          // Avaliação aproximada baseada no tempo para voz nativa (já que não há .currentTime)
+          currentTime = (Date.now() - startTime) / 1000;
+          totalDuration = estimatedDuration;
+
+          // Evita que os cards fiquem loucos se pausarmos
+          if (window.speechSynthesis.paused) return;
+        } else {
+          if (!audioRef.current || audioRef.current.paused) return;
+          currentTime = audioRef.current.currentTime;
+          totalDuration = audioRef.current.duration || estimatedDuration;
+        }
 
         if (!totalDuration || isNaN(totalDuration)) return;
 
@@ -349,9 +268,12 @@ export function TotemPage() {
         let foundIndex = 0;
 
         if (workflow?.steps && workflow.steps.length > 0) {
+          // Precisão Extrema: Usamos o peso real do texto falado de cada passo
+          const stepWeights = workflow.steps.map((s: any) => (s.spoken_text || s.description || " ").length);
+          const totalWeight = stepWeights.reduce((a: number, b: number) => a + b, 0);
+
           for (let i = 0; i < workflow.steps.length; i++) {
-            const s = workflow.steps[i];
-            const weight = (s.spoken_text || s.description || "123").length / (totalChars || 1);
+            const weight = stepWeights[i] / totalWeight;
             cumulativePercent += weight;
 
             if (percent <= cumulativePercent) {
@@ -359,12 +281,12 @@ export function TotemPage() {
               break;
             }
           }
-          // Clamp to last index if we overshot (due to small floats/rounding)
+          // Clamp to last index if we overshot
           if (percent >= 0.99) foundIndex = workflow.steps.length - 1;
         }
 
         setCurrentStepIndex(foundIndex);
-      }, 100);
+      }, 50); // Maior frequência de atualização (50ms) para fluidez
 
       (window as any)._audioProgressInterval = progressInterval;
 
@@ -410,6 +332,10 @@ export function TotemPage() {
     setError("");
     setActiveWorkflow(null);
     setCurrentStepIndex(0);
+    if (finishingTimeoutRef.current) {
+      clearTimeout(finishingTimeoutRef.current);
+      finishingTimeoutRef.current = null;
+    }
 
     try {
       recognitionRef.current.start();
@@ -430,14 +356,17 @@ export function TotemPage() {
       audioRef.current.currentTime = 0;
     }
 
-    // Immediately stop audio if playing via Simli
-    if (simliClientRef.current) {
-      simliClientRef.current.ClearBuffer();
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
     }
 
     // Clear simulated timeouts
     if ((window as any)._audioProgressInterval) clearInterval((window as any)._audioProgressInterval);
     if ((window as any)._audioEndTimeout) clearTimeout((window as any)._audioEndTimeout);
+    if (finishingTimeoutRef.current) {
+      clearTimeout(finishingTimeoutRef.current);
+      finishingTimeoutRef.current = null;
+    }
 
     setState("idle");
     setActiveWorkflow(null);
@@ -446,31 +375,59 @@ export function TotemPage() {
     setTranscript("");
     setError("");
     setIsGeneratingImages(false);
-    setIsAvatarConnected(false);
   };
 
   const handleTogglePause = () => {
-    if (!audioRef.current) return;
-    if (audioRef.current.paused) {
-      audioRef.current.play().catch(e => console.error("Resume failed:", e));
+    if (useNativeVoice) {
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+        setIsPaused(false);
+      } else {
+        window.speechSynthesis.pause();
+        setIsPaused(true);
+      }
     } else {
-      audioRef.current.pause();
+      if (!audioRef.current) return;
+      if (audioRef.current.paused) {
+        audioRef.current.play().then(() => setIsPaused(false)).catch(e => console.error("Resume failed:", e));
+      } else {
+        audioRef.current.pause();
+        setIsPaused(true);
+      }
     }
   };
 
-  const handleFinish = () => {
+  const handleFinish = (immediate = false) => {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.currentTime = 0;
     }
 
-    if ((window as any)._audioProgressInterval) clearInterval((window as any)._audioProgressInterval);
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
 
-    setState("idle");
-    setActiveWorkflow(null);
-    setCurrentStepIndex(0);
-    setConversationContext("");
-    setIsPaused(false);
+    if ((window as any)._audioProgressInterval) clearInterval((window as any)._audioProgressInterval);
+    if (finishingTimeoutRef.current) {
+      clearTimeout(finishingTimeoutRef.current);
+      finishingTimeoutRef.current = null;
+    }
+
+    const resetStates = () => {
+      setState("idle");
+      setActiveWorkflow(null);
+      setCurrentStepIndex(0);
+      setConversationContext("");
+      setIsPaused(false);
+      finishingTimeoutRef.current = null;
+    };
+
+    if (immediate) {
+      resetStates();
+    } else {
+      // Delay de 3 segundos antes de limpar o workflow e disparar a animação de saída
+      finishingTimeoutRef.current = window.setTimeout(resetStates, 3000);
+    }
   };
 
   const handleQuickAction = async (key: string) => {
@@ -480,10 +437,11 @@ export function TotemPage() {
 
     // Convert key to a natural question for our RAG backend
     let questionToProcess = "";
-    if (key === "pop_marketing") questionToProcess = "Fluxo Marketing";
+    if (key === "Fluxo de Marketing" || key === "pop_marketing") questionToProcess = "Fluxo de Marketing";
     else if (key === "pop_comercial") questionToProcess = "Fluxo Aplicação Técnica";
     else if (key === "pop_industria") questionToProcess = "Fluxo Setup de Empacotamento";
     else if (key === "pop_totem") questionToProcess = "Fluxo Prospecção de Negócios";
+    else questionToProcess = key; // Fallback to key itself if no mapping found
 
     await handleProcessTranscript(questionToProcess);
   };
@@ -495,7 +453,11 @@ export function TotemPage() {
   })) as WorkflowStep[] | undefined;
 
   return (
-    <div className="min-h-screen bg-black text-white font-sans overflow-hidden flex flex-col relative">
+    <div className="h-screen w-screen bg-black text-white font-sans overflow-hidden flex flex-col items-center relative p-8">
+      {/* Background stays absolute */}
+      <div className="absolute inset-0 bg-radial-[circle_at_center,_var(--tw-gradient-stops)] from-slate-900 via-black to-black -z-20" />
+      <div className="absolute top-0 left-0 w-full h-1/2 bg-gradient-to-b from-cyan-900/10 to-transparent -z-10" />
+
       {/* Loading Overlay */}
       <AnimatePresence>
         {isGeneratingImages && (
@@ -503,35 +465,28 @@ export function TotemPage() {
         )}
       </AnimatePresence>
 
-      {/* Background Ambience */}
-      <div className="absolute inset-0 bg-radial-[circle_at_center,_var(--tw-gradient-stops)] from-slate-900 via-black to-black -z-20" />
-      <div className="absolute top-0 left-0 w-full h-1/2 bg-gradient-to-b from-cyan-900/10 to-transparent -z-10" />
-
-      {/* Header / Status & Accessibility */}
-      <header className="absolute top-8 left-8 right-8 flex justify-between items-start z-20">
-        <div className="flex flex-col gap-4">
+      {/* 1. Header Section */}
+      <header className="w-full flex justify-between items-start z-20 mb-4 h-20 flex-shrink-0">
+        <div className="flex flex-col gap-2">
           <motion.img
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             src="/logo.png"
             alt="Milhão Ingredients"
-            className="h-12 w-auto object-contain self-start"
+            className="h-10 w-auto object-contain self-start"
             onError={(e) => (e.currentTarget.style.display = 'none')}
           />
           <div>
-            <h1 className="text-sm font-light tracking-[0.3em] text-cyan-500 uppercase opacity-80">
+            <h1 className="text-[10px] font-light tracking-[0.3em] text-cyan-500 uppercase opacity-80">
               Sistema Online
             </h1>
-            <p className="text-xs text-slate-500 mt-1">v2.4.1 • Conectado</p>
           </div>
         </div>
 
-        {/* Accessibility Menu */}
         <div className="relative">
           <button
             onClick={() => setShowA11yMenu(!showA11yMenu)}
             className="p-3 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 hover:border-cyan-500/50 transition-all text-cyan-400"
-            title="Acessibilidade"
           >
             <Accessibility className="w-5 h-5" />
           </button>
@@ -542,16 +497,22 @@ export function TotemPage() {
                 initial={{ opacity: 0, scale: 0.9, y: 10 }}
                 animate={{ opacity: 1, scale: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.9, y: 10 }}
-                className="absolute right-0 mt-4 w-48 bg-cyan-950/90 backdrop-blur-xl border border-cyan-500/30 rounded-xl p-4 shadow-2xl flex flex-col gap-3"
+                className="absolute right-0 mt-4 w-48 bg-cyan-950/90 backdrop-blur-xl border border-cyan-500/30 rounded-xl p-4 shadow-2xl flex flex-col gap-3 z-50"
               >
                 <h3 className="text-xs font-bold text-cyan-400 uppercase tracking-wider border-b border-cyan-500/20 pb-2 mb-1">Acessibilidade</h3>
-
                 <label className="flex items-center justify-between cursor-pointer group">
-                  <span className="text-sm text-slate-300 group-hover:text-cyan-200 transition-colors">Legendas</span>
+                  <span className="text-sm text-slate-300">Legendas</span>
                   <div className={cn("w-10 h-5 rounded-full transition-colors relative", showSubtitles ? "bg-cyan-500" : "bg-slate-700")}>
                     <div className={cn("absolute top-0.5 bottom-0.5 w-4 rounded-full bg-white transition-all shadow-sm", showSubtitles ? "right-0.5" : "left-0.5")} />
                   </div>
                   <input type="checkbox" className="hidden" checked={showSubtitles} onChange={() => setShowSubtitles(!showSubtitles)} />
+                </label>
+                <label className="flex items-center justify-between cursor-pointer group mt-2">
+                  <span className="text-sm text-slate-300">Voz Teste</span>
+                  <div className={cn("w-10 h-5 rounded-full transition-colors relative", useNativeVoice ? "bg-cyan-500" : "bg-slate-700")}>
+                    <div className={cn("absolute top-0.5 bottom-0.5 w-4 rounded-full bg-white transition-all shadow-sm", useNativeVoice ? "right-0.5" : "left-0.5")} />
+                  </div>
+                  <input type="checkbox" className="hidden" checked={useNativeVoice} onChange={() => setUseNativeVoice(!useNativeVoice)} />
                 </label>
               </motion.div>
             )}
@@ -559,229 +520,168 @@ export function TotemPage() {
         </div>
       </header>
 
-      {/* Context Display - Step Subtitles */}
-      <AnimatePresence mode="wait">
-        {showSubtitles && activeWorkflow && state === "answering" && (
-          <motion.div
-            key={currentStepIndex}
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            className="absolute top-[75%] translate-y-4 left-8 right-8 z-10 mx-auto max-w-4xl"
-          >
-            <div className="bg-white/5 backdrop-blur-md px-6 py-4 rounded-xl border border-white/10 shadow-2xl">
-              <span className="text-xs text-cyan-400 uppercase tracking-widest font-bold block mb-2 opacity-70">
-                Narrando: Passo {currentStepIndex + 1}
-              </span>
-              <p className="text-xl text-slate-100 font-medium leading-relaxed text-center">
-                {activeWorkflow.steps[currentStepIndex]?.spoken_text || activeWorkflow.steps[currentStepIndex]?.description}
-              </p>
-            </div>
-          </motion.div>
-        )}
+      {/* 2. Content Area (Flex-grow to take available space) */}
+      <main className="w-full flex-1 flex flex-col items-center justify-center relative z-10 overflow-hidden px-4">
 
-        {/* Fallback context when NOT in an explicit workflow step or listening */}
-        {showSubtitles && conversationContext && !activeWorkflow && (
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="absolute top-36 left-8 right-8 z-10 mx-auto max-w-4xl"
-          >
-            <div className="bg-white/5 backdrop-blur-md px-6 py-4 rounded-xl border border-white/10 shadow-2xl">
-              <p className="text-base text-slate-200 font-light leading-relaxed text-justify">
-                {conversationContext}
-              </p>
-              {transcript && state === "listening" && (
-                <p className="text-sm text-cyan-200 mt-4 italic border-t border-white/5 pt-2 text-center">
-                  {transcript}
-                </p>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Error Message */}
-      <AnimatePresence>
-        {error && (
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="absolute top-24 left-1/2 -translate-x-1/2 z-30"
-          >
-            <div className="bg-red-500/20 border border-red-500/50 px-4 py-2 rounded-lg backdrop-blur-md">
-              <p className="text-sm text-red-200">{error}</p>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Main Content Area */}
-      <main className="flex-1 flex flex-col items-center justify-center relative z-10 w-full">
-
-        {/* Audio Visualizer when listening */}
+        {/* Error Message */}
         <AnimatePresence>
-          {state === "listening" && (
+          {error && (
             <motion.div
-              initial={{ opacity: 0, y: 20 }}
+              initial={{ opacity: 0, y: -20 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              className="absolute top-32 left-0 right-0 flex justify-center"
+              exit={{ opacity: 0 }}
+              className="absolute top-0 z-30"
             >
-              <div className="bg-black/40 backdrop-blur-md px-8 py-4 rounded-2xl border border-red-500/30">
-                <AudioVisualizer />
+              <div className="bg-red-500/20 border border-red-500/50 px-4 py-2 rounded-lg backdrop-blur-md">
+                <p className="text-sm text-red-200">{error}</p>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* The Avatar Screen - HIDDEN */}
-        <AnimatePresence>
-          {state === "listening" && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.8 }}
-              className="relative mx-auto w-96 h-96 rounded-full overflow-hidden border-2 border-cyan-500/30 shadow-[0_0_80px_rgba(8,145,178,0.2)] z-10 mt-16 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm"
-            >
-              <div className="absolute inset-0 rounded-full border-4 border-cyan-400 animate-ping opacity-20 pointer-events-none" />
-              <div className="text-cyan-400 text-6xl opacity-30">🎙️</div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+        {/* Dynamic Display (Cards or Avatar or Subtitles) */}
+        <div className="w-full flex-1 flex flex-col items-center justify-center gap-8 min-h-0">
 
-        {/* Workflow Visualization Overlay - Centered */}
-        <AnimatePresence>
-          {state === "answering" && activeWorkflow && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="absolute inset-x-0 top-[40%] -translate-y-1/2 flex justify-center items-center px-12 z-50"
-            >
-              <WorkflowVisualizer
-                steps={currentSteps as any}
-                className="w-full max-w-7xl"
-                elaboratedBy={activeWorkflow.elaborated_by}
-                approvedBy={activeWorkflow.approved_by}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+          <AnimatePresence mode="wait">
+            {state === "listening" ? (
+              <motion.div
+                key="listening-view"
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                className="flex flex-col items-center gap-8"
+              >
+                <div className="relative w-64 h-64 rounded-full overflow-hidden border-2 border-cyan-500/30 shadow-[0_0_80px_rgba(8,145,178,0.2)] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm">
+                  <div className="absolute inset-0 rounded-full border-4 border-cyan-400 animate-ping opacity-20" />
+                  <div className="text-cyan-400 text-6xl">🎙️</div>
+                </div>
+                <div className="bg-black/40 backdrop-blur-md px-8 py-4 rounded-2xl border border-red-500/30">
+                  <AudioVisualizer />
+                </div>
+              </motion.div>
+            ) : activeWorkflow && state === "answering" ? (
+              <motion.div
+                key="workflow-view"
+                initial={{ opacity: 0, scale: 0.95, filter: "blur(10px)" }}
+                animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
+                exit={{
+                  opacity: 0,
+                  scale: 1.1,
+                  y: -50,
+                  filter: "blur(20px)",
+                  transition: { duration: 0.8, ease: "circIn" }
+                }}
+                className="w-full h-full flex flex-col items-center justify-center gap-2"
+              >
+                <div className="flex-1 w-full min-h-0 flex items-center justify-center">
+                  <WorkflowVisualizer
+                    steps={currentSteps as any}
+                    className="w-full max-w-7xl scale-90 sm:scale-95 md:scale-100 transition-transform"
+                    elaboratedBy={activeWorkflow.elaborated_by}
+                    approvedBy={activeWorkflow.approved_by}
+                  />
+                </div>
 
-        {/* Interaction Zone (Mic & Quick Actions) */}
-        <motion.div
-          animate={{
-            opacity: 1,
-            y: 0,
-          }}
-          className="absolute bottom-8 left-0 right-0 flex flex-col items-center gap-8 z-50"
-        >
-          {/* Quick Actions */}
-          {state === "idle" && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="flex flex-wrap justify-center gap-4 px-4"
-            >
-              <QuickActionButton
-                icon={<ArrowRight className="w-4 h-4" />}
-                label="Fluxo Marketing e Vendas"
-                onClick={() => handleQuickAction("pop_marketing")}
-              />
-              <QuickActionButton
-                icon={<ArrowRight className="w-4 h-4" />}
-                label="Fluxo Aplicação Técnica"
-                onClick={() => handleQuickAction("pop_comercial")}
-              />
-              <QuickActionButton
-                icon={<ArrowRight className="w-4 h-4" />}
-                label="Fluxo Setup de Empacotamento"
-                onClick={() => handleQuickAction("pop_industria")}
-              />
-              <QuickActionButton
-                icon={<ArrowRight className="w-4 h-4" />}
-                label="Fluxo Prospecção de Negócios"
-                onClick={() => handleQuickAction("pop_totem")}
-              />
-            </motion.div>
-          )}
+                {/* Subtitles Integrated in Layout */}
+                {showSubtitles && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="w-full max-w-3xl bg-white/5 backdrop-blur-md px-4 py-2 rounded-xl border border-white/10 shadow-2xl flex-shrink-0 mb-2"
+                  >
+                    <span className="text-[9px] text-cyan-400 uppercase tracking-widest font-bold block mb-0.5 opacity-70">
+                      Narrando: Passo {currentStepIndex + 1}
+                    </span>
+                    <p className="text-base text-slate-100 font-medium leading-relaxed text-center line-clamp-2">
+                      {activeWorkflow.steps[currentStepIndex]?.spoken_text || activeWorkflow.steps[currentStepIndex]?.description}
+                    </p>
+                  </motion.div>
+                )}
+              </motion.div>
+            ) : (
+              <motion.div
+                key="idle-view"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex flex-col items-center text-center max-w-xl"
+              >
+                <h2 className="text-4xl font-bold text-white mb-4 bg-gradient-to-r from-white to-cyan-400 bg-clip-text text-transparent">
+                  Olá, eu sou o Sr. Million
+                </h2>
+                <p className="text-slate-400 text-lg leading-relaxed">
+                  Estou pronto para ajudar você com informações técnicas e procedimentos corporativos da Milhão Ingredients.
+                </p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
 
-          {/* Microphone / Stop Button */}
-          <div className="flex flex-col items-center gap-4">
+      </main>
+
+      {/* 3. Interaction Zone (Bottom Bar) */}
+      <footer className="w-full flex-shrink-0 flex flex-col items-center gap-6 pt-4 pb-2 z-20">
+
+        {/* Quick Actions */}
+        {state === "idle" && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="flex flex-wrap justify-center gap-3 px-4"
+          >
+            <QuickActionButton icon={<ArrowRight className="w-4 h-4" />} label="Fluxo de Marketing" onClick={() => handleQuickAction("Fluxo de Marketing")} />
+            <QuickActionButton icon={<ArrowRight className="w-4 h-4" />} label="Aplicação Técnica" onClick={() => handleQuickAction("pop_comercial")} />
+            <QuickActionButton icon={<ArrowRight className="w-4 h-4" />} label="Setup Indústria" onClick={() => handleQuickAction("pop_industria")} />
+            <QuickActionButton icon={<ArrowRight className="w-4 h-4" />} label="Prospecção" onClick={() => handleQuickAction("pop_totem")} />
+          </motion.div>
+        )}
+
+        {/* Main Controls */}
+        <div className="flex flex-col items-center gap-4">
+          <div className="flex items-center gap-6">
             {state === "idle" ? (
               <button
                 onClick={handleStartListening}
-                className={cn(
-                  "relative group flex items-center justify-center w-20 h-20 rounded-full transition-all duration-300",
-                  "bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 hover:scale-110 shadow-[0_0_20px_rgba(8,145,178,0.2)]"
-                )}
+                className="relative group flex items-center justify-center w-16 h-16 rounded-full bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 hover:scale-110 shadow-lg transition-all"
               >
-                {/* Ripple Effect Ring */}
-                <div className="absolute inset-0 rounded-full border border-current opacity-30 scale-110 group-hover:scale-125 transition-transform duration-500" />
-
-                <Mic className="w-8 h-8" />
+                <div className="absolute inset-0 rounded-full border border-current opacity-30 scale-110 group-hover:scale-125 transition-transform" />
+                <Mic className="w-7 h-7" />
               </button>
             ) : state === "answering" ? (
-              <div className="flex items-center gap-6">
+              <div className="flex items-center gap-4">
                 <button
                   onClick={handleTogglePause}
-                  className={cn(
-                    "relative group flex items-center justify-center gap-3 px-6 py-3 rounded-full transition-all duration-300",
-                    "bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 border border-cyan-500/30 shadow-lg"
-                  )}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-cyan-500/20 text-cyan-400 hover:bg-cyan-500/30 border border-cyan-500/30 transition-all"
                 >
-                  {isPaused ? (
-                    <ArrowRight className="w-5 h-5 fill-current" />
-                  ) : (
-                    <div className="flex gap-1">
-                      <div className="w-1.5 h-4 bg-cyan-400 rounded-full" />
-                      <div className="w-1.5 h-4 bg-cyan-400 rounded-full" />
-                    </div>
-                  )}
-                  <span className="font-bold tracking-widest uppercase text-xs">
-                    {isPaused ? "Continuar" : "Pausar"}
-                  </span>
+                  {isPaused ? <ArrowRight className="w-4 h-4" /> : <div className="flex gap-1"><div className="w-1.5 h-3.5 bg-cyan-400 rounded-full" /><div className="w-1.5 h-3.5 bg-cyan-400 rounded-full" /></div>}
+                  <span className="font-bold uppercase text-[10px] tracking-widest">{isPaused ? "Continuar" : "Pausar"}</span>
                 </button>
-
                 <button
-                  onClick={handleFinish}
-                  className={cn(
-                    "relative group flex items-center justify-center gap-3 px-6 py-3 rounded-full transition-all duration-300",
-                    "bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 shadow-lg"
-                  )}
+                  onClick={() => handleFinish(true)}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-red-500/20 text-red-400 hover:bg-red-500/30 border border-red-500/30 transition-all"
                 >
-                  <StopCircle className="w-5 h-5" />
-                  <span className="font-bold tracking-widest uppercase text-xs">Encerrar</span>
+                  <StopCircle className="w-4 h-4" />
+                  <span className="font-bold uppercase text-[10px] tracking-widest">Encerrar</span>
                 </button>
               </div>
             ) : (
               <button
                 onClick={handleStop}
-                className={cn(
-                  "relative group flex items-center justify-center gap-3 px-8 py-4 rounded-full transition-all duration-300",
-                  "bg-red-500/20 text-red-400 hover:bg-red-500/40 hover:scale-105 shadow-[0_0_30px_rgba(239,68,68,0.4)]"
-                )}
+                className="flex items-center gap-3 px-6 py-3 rounded-full bg-red-500/20 text-red-400 border border-red-500/50 hover:bg-red-500/30 transition-all shadow-[0_0_20px_rgba(239,68,68,0.2)]"
               >
-                {/* Ripple Effect Ring */}
-                <div className="absolute inset-0 rounded-full border border-red-500/50 opacity-30 scale-105 animate-pulse" />
-
-                <StopCircle className="w-6 h-6" />
-                <span className="font-bold tracking-widest uppercase">Parar</span>
+                <StopCircle className="w-5 h-5" />
+                <span className="font-bold uppercase text-xs tracking-widest">Parar</span>
               </button>
             )}
-
-            <p className="text-xs text-slate-500 tracking-widest uppercase mt-2">
-              {state === "listening" ? "Ouvindo sua pergunta..." :
-                state === "processing" ? "Sr. Million está pensando..." :
-                  state === "answering" ? "Respondendo em áudio..." :
-                    "Toque para Falar ou Escolha uma Pergunta"}
-            </p>
           </div>
-        </motion.div>
-      </main>
+
+          <p className="text-[10px] text-slate-500 tracking-[0.2em] uppercase">
+            {state === "listening" ? "Sintonizando sua voz..." :
+              state === "processing" ? "Sr. Million em processamento..." :
+                state === "answering" ? "Módulo de síntese de voz ativo" :
+                  "Inicie um Protocolo de Voz ou Toque em uma POP"}
+          </p>
+        </div>
+      </footer>
       <audio ref={audioRef} className="hidden" />
     </div>
   );
